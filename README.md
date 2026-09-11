@@ -122,6 +122,19 @@ call. Player props cost that same rate *per event* — e.g. scanning
 testing. The Odds API's free tier includes 500 requests/month — budget
 your polling frequency accordingly.
 
+## Testing
+
+```bash
+python3 -m unittest test_ev_finder.py -v
+```
+
+Tests use only the standard library `unittest` (matching the project's
+zero-dependency philosophy) and make no network calls — they exercise the
+odds-conversion/devig/EV/Kelly math directly and run the CLI end-to-end
+against the hardcoded `--demo` payload. CI (`.github/workflows/ci.yml`)
+runs this suite plus a `--demo` smoke test on every push and PR against
+Python 3.9–3.12.
+
 ## Disclaimer
 
 This tool estimates expected value from publicly posted odds; it does not
