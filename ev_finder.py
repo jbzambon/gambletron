@@ -107,6 +107,19 @@ slate is 15 x 2 x 1 region = 30 requests. --max-events (default 5) caps
 that while testing, and the estimated cost is printed to stderr before
 the per-event calls run. The Odds API's free tier includes 500 requests
 per month -- budget your polling frequency accordingly.
+
+Pregame-only by default
+------------------------
+Live odds move fast and inconsistently across books as they react to the
+real-time score at different speeds -- devigging a lagging Pinnacle/
+consensus snapshot against a soft book that's already repriced to game
+state produces a large but untradeable fake EV. (This was caught live:
+an NHL scan once flagged a moneyline dog at +11% EV against Pinnacle
+while a third book had already repriced the same side to +3300 -- a
+spread that never happens pregame.) To avoid that, every live run drops
+any event whose commence_time has already passed before scanning it,
+printing how many it excluded. Pass --include-live to scan live games
+anyway if that's specifically what you want.
 """
 
 from __future__ import annotations
@@ -118,6 +131,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 # --------------------------------------------------------------------------
@@ -361,6 +375,43 @@ def fetch_event_odds(
             file=sys.stderr,
         )
         return None
+
+
+# --------------------------------------------------------------------------
+# Pregame filtering
+# --------------------------------------------------------------------------
+
+
+def parse_commence_time(commence_time: str) -> datetime:
+    """Parse The Odds API's commence_time (ISO 8601, e.g.
+    "2026-10-14T23:40:00Z") into an aware UTC datetime."""
+    return datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
+
+
+def is_pregame(event: Dict[str, Any], now: Optional[datetime] = None) -> bool:
+    """Whether `event` hasn't started yet as of `now` (default: current
+    time). A started/live game's odds move fast and inconsistently across
+    books as they react to the live score at different speeds -- comparing
+    a lagging Pinnacle snapshot against a book that's already repriced to
+    game state produces a large but fake "EV" that isn't actually
+    tradeable (see the Oct 2026 Senators ML false positive this was added
+    to catch: Pinnacle +902 vs. BetMGM +3300 on the same side of an
+    already-started game -- a spread pregame books never show). Events
+    missing commence_time are treated as pregame rather than silently
+    dropped, since that's a data gap, not evidence the game started."""
+    commence_time = event.get("commence_time")
+    if not commence_time:
+        return True
+    if now is None:
+        now = datetime.now(timezone.utc)
+    return parse_commence_time(commence_time) > now
+
+
+def filter_pregame(
+    events: List[Dict[str, Any]], now: Optional[datetime] = None
+) -> List[Dict[str, Any]]:
+    """Drop any event that has already started (see is_pregame)."""
+    return [e for e in events if is_pregame(e, now)]
 
 
 # --------------------------------------------------------------------------
@@ -985,6 +1036,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--include-live",
+        action="store_true",
+        help=(
+            "Include games that have already started (default: pregame "
+            "only). A started game's books reprice to the live score at "
+            "different speeds, so devigging a lagging Pinnacle/consensus "
+            "snapshot against an already-repriced soft-book line produces "
+            "a large but untradeable fake EV -- pass this only if you "
+            "specifically want live-game odds and understand that risk."
+        ),
+    )
+    parser.add_argument(
         "--demo",
         action="store_true",
         help="Skip the network call and run against a hardcoded demo event",
@@ -1046,7 +1109,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             except (urllib.error.HTTPError, urllib.error.URLError):
                 return 1
             if target_event_ids is not None:
+                # Explicit --events names games the caller specifically
+                # wants -- trust that choice over the pregame filter.
                 slate = [e for e in slate if e.get("id") in target_event_ids]
+            elif not args.include_live:
+                before = len(slate)
+                slate = filter_pregame(slate)
+                dropped = before - len(slate)
+                if dropped:
+                    print(
+                        f"Excluded {dropped} already-started game(s) "
+                        "(pass --include-live to include them)",
+                        file=sys.stderr,
+                    )
             events.extend(slate)
 
         if prop_markets:
@@ -1059,6 +1134,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                     event_stubs = fetch_events(args.sport, api_key)
                 except (urllib.error.HTTPError, urllib.error.URLError):
                     return 1
+                if not args.include_live:
+                    before = len(event_stubs)
+                    event_stubs = filter_pregame(event_stubs)
+                    dropped = before - len(event_stubs)
+                    if dropped:
+                        print(
+                            f"Excluded {dropped} already-started game(s) "
+                            "(pass --include-live to include them)",
+                            file=sys.stderr,
+                        )
                 event_ids = [stub["id"] for stub in event_stubs][: args.max_events]
 
             n_regions = REGIONS.count(",") + 1

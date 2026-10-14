@@ -230,6 +230,42 @@ class TestDevigMarketOutcomesGrouping(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# Pregame filtering
+# --------------------------------------------------------------------------
+
+
+class TestPregameFilter(unittest.TestCase):
+    """Regression tests for the already-started-game filter. Added after a
+    live NHL scan flagged Ottawa Senators ML as +11% EV against Pinnacle
+    while BetMGM had already repriced the same side to +3300 -- a spread
+    that never occurs pregame and that only shows up once a game is live
+    and books are reacting to the score at different speeds."""
+
+    def setUp(self):
+        self.now = ef.datetime(2026, 10, 14, 12, 0, 0, tzinfo=ef.timezone.utc)
+
+    def test_future_game_is_pregame(self):
+        event = {"commence_time": "2026-10-14T23:40:00Z"}
+        self.assertTrue(ef.is_pregame(event, self.now))
+
+    def test_past_game_is_not_pregame(self):
+        event = {"commence_time": "2026-10-13T23:38:13Z"}
+        self.assertFalse(ef.is_pregame(event, self.now))
+
+    def test_missing_commence_time_treated_as_pregame(self):
+        # A data gap isn't evidence the game started -- don't silently drop it.
+        self.assertTrue(ef.is_pregame({}, self.now))
+
+    def test_filter_pregame_drops_only_started_games(self):
+        events = [
+            {"id": "future", "commence_time": "2026-10-14T23:40:00Z"},
+            {"id": "past", "commence_time": "2026-10-13T23:38:13Z"},
+        ]
+        kept = ef.filter_pregame(events, self.now)
+        self.assertEqual([e["id"] for e in kept], ["future"])
+
+
+# --------------------------------------------------------------------------
 # Consensus reference
 # --------------------------------------------------------------------------
 
