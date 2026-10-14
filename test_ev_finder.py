@@ -228,6 +228,16 @@ class TestDevigMarketOutcomesGrouping(unittest.TestCase):
         fair = ef.devig_market_outcomes(outcomes, "multiplicative")
         self.assertEqual(fair, {})
 
+    def test_spreads_opposite_points_share_one_group(self):
+        # A spread's two sides are opposite-signed points (+1.5 / -1.5) --
+        # devig_group_key must NOT split on point, or each side becomes its
+        # own unpaired singleton group and devigs to nothing.
+        home = {"name": "New York Yankees", "point": -1.5, "price": 1.74}
+        away = {"name": "Boston Red Sox", "point": 1.5, "price": 2.20}
+        self.assertEqual(ef.devig_group_key(home), ef.devig_group_key(away))
+        fair = ef.devig_market_outcomes([home, away], "multiplicative")
+        self.assertEqual(len(fair), 2)
+
 
 # --------------------------------------------------------------------------
 # Pregame filtering
@@ -348,6 +358,46 @@ class TestConsensus(unittest.TestCase):
         # Only pinnacle + draftkings quoted the complete line -- fanduel's
         # partial quote doesn't push the count to CONSENSUS_MIN_BOOKS (3).
         self.assertEqual(fair, {})
+
+    def test_split_point_lines_not_conflated(self):
+        # Regression test: Pinnacle/BetMGM quote this total at 6.0 while
+        # FanDuel/DraftKings/BetRivers quote it at 6.5 (ordinary
+        # total-shopping variance). Before devig_line_signature existed,
+        # consensus_fair_probs grouped purely by devig_group_key (which is
+        # the same -- None -- for every totals outcome regardless of
+        # point), so the 6.0 and 6.5 lines got merged into one inflated
+        # canonical set and every book's complete-but-different-point line
+        # looked "partial" -- producing no consensus value at all despite
+        # 3 books fully agreeing at 6.5.
+        def totals_book(point, over_price, under_price):
+            return {
+                "markets": [
+                    {
+                        "key": "totals",
+                        "outcomes": [
+                            {"name": "Over", "point": point, "price": over_price},
+                            {"name": "Under", "point": point, "price": under_price},
+                        ],
+                    }
+                ]
+            }
+
+        bookmakers = {
+            "pinnacle": totals_book(6.0, 1.88, 2.01),
+            "betmgm": totals_book(6.0, 1.83, 2.00),
+            "fanduel": totals_book(6.5, 2.04, 1.78),
+            "draftkings": totals_book(6.5, 2.10, 1.77),
+            "betrivers": totals_book(6.5, 2.04, 1.78),
+        }
+        fair = ef.consensus_fair_probs(bookmakers, "totals", "multiplicative")
+
+        # The 6.5 line has 3 qualifying books (>= CONSENSUS_MIN_BOOKS) and
+        # must produce a value; the 6.0 line has only 2 and must not.
+        self.assertIn(("Over", 6.5), fair)
+        self.assertIn(("Under", 6.5), fair)
+        self.assertNotIn(("Over", 6.0), fair)
+        self.assertNotIn(("Under", 6.0), fair)
+        self.assertAlmostEqual(fair[("Over", 6.5)] + fair[("Under", 6.5)], 1.0)
 
 
 # --------------------------------------------------------------------------

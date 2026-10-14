@@ -685,12 +685,36 @@ def devig_group_key(outcome: Dict[str, Any]) -> Any:
     sides. `description` is the only thing that distinguishes independent
     bets sharing a single market response: h2h/totals/spreads have no
     `description`, so every outcome shares one group (the whole market, as
-    a single two- or three-way bet). A prop market like batter_home_runs
-    packs many players' Over/Under pairs into one response -- each
-    player's pair is `description`-keyed to its own group, devigged
-    independently of every other player's, since a 20-player market isn't
-    one 40-way bet."""
+    a single two- or three-way bet) -- this must NOT also split on `point`,
+    since a spread's two sides are opposite-signed points (e.g. +1.5 /
+    -1.5) that belong in one group, not two singleton ones. A prop market
+    like batter_home_runs packs many players' Over/Under pairs into one
+    response -- each player's pair is `description`-keyed to its own
+    group, devigged independently of every other player's, since a
+    20-player market isn't one 40-way bet.
+
+    This key answers "which outcomes form one coherent bet" -- it does NOT
+    answer "is this the same line as that book's line" when two books
+    disagree on the point itself (e.g. one book's total at 6.0 vs.
+    another's at 6.5); that cross-book comparison needs the point too, and
+    is handled separately by consensus_fair_probs' own line-signature
+    logic rather than folded in here."""
     return outcome.get("description")
+
+
+def devig_line_signature(group_outcomes: List[Dict[str, Any]]) -> Any:
+    """Identifies "the same line" for cross-book comparison in
+    consensus_fair_probs: the group's devig_group_key plus the full set of
+    points its outcomes carry (e.g. {-1.5, 1.5} for a normal spread pair,
+    {8.5} for a totals pair, {0.5} for a one-player prop pair). Two books'
+    groups with the same signature are quoting the same bet and can be
+    averaged together; different signatures (e.g. a total at 6.0 vs. 6.5,
+    ordinary total-shopping variance) are different bets and must not be
+    merged, or a book's complete line at one point would look "partial"
+    next to another book's complete line at a different point."""
+    gkey = devig_group_key(group_outcomes[0]) if group_outcomes else None
+    points = frozenset(o.get("point") for o in group_outcomes)
+    return (gkey, points)
 
 
 def devig_market_outcomes(
@@ -722,12 +746,18 @@ def consensus_fair_probs(
     price for that exact line, requiring at least CONSENSUS_MIN_BOOKS books
     that each quote the *complete* set of sides for that line -- a book
     offering only "Over 0.5" without "Under 0.5" for a player doesn't get a
-    vote on that player's line. Existing purely to cope with Pinnacle's
-    thin prop coverage; for h2h/totals/spreads (one group, the whole
-    market) this just averages whichever books quote the full market."""
-    # Canonical side-set per group: which outcome_keys *any* book has
-    # attached to this group, so we can tell a book offering the complete
-    # line apart from one offering only part of it.
+    vote on that player's line, and a book quoting a different point than
+    the rest (e.g. a total at 6.0 while others are at 6.5 -- ordinary
+    total-shopping variance) is a different line entirely, not a partial
+    one, and isn't merged in with it (see devig_line_signature). Existing
+    purely to cope with Pinnacle's thin prop coverage; for h2h/totals/
+    spreads (one group, the whole market) this just averages whichever
+    books quote the full market at the same point(s)."""
+    # Canonical side-set per *line* (group + the points it covers): which
+    # outcome_keys any book has attached to this exact line, so we can
+    # tell a book offering the complete line apart from one offering only
+    # part of it, without conflating two different lines that happen to
+    # share the same group key.
     canonical_keys: Dict[Any, set] = {}
     book_outcomes: List[Tuple[str, List[Dict[str, Any]]]] = []
     for book_key in ALL_BOOKS:
@@ -739,20 +769,25 @@ def consensus_fair_probs(
             continue
         outcomes = market.get("outcomes", [])
         book_outcomes.append((book_key, outcomes))
+        groups: Dict[Any, List[Dict[str, Any]]] = {}
         for outcome in outcomes:
-            canonical_keys.setdefault(devig_group_key(outcome), set()).add(
-                outcome_key(outcome)
+            groups.setdefault(devig_group_key(outcome), []).append(outcome)
+        for group_outcomes in groups.values():
+            sig = devig_line_signature(group_outcomes)
+            canonical_keys.setdefault(sig, set()).update(
+                outcome_key(o) for o in group_outcomes
             )
 
     # Per outcome_key, the list of fair probabilities contributed by books
-    # that quoted that outcome's entire group.
+    # that quoted that outcome's entire line.
     contributions: Dict[Tuple[Any, ...], List[float]] = {}
     for _book_key, outcomes in book_outcomes:
         groups: Dict[Any, List[Dict[str, Any]]] = {}
         for outcome in outcomes:
             groups.setdefault(devig_group_key(outcome), []).append(outcome)
-        for gkey, group_outcomes in groups.items():
-            if {outcome_key(o) for o in group_outcomes} != canonical_keys.get(gkey):
+        for group_outcomes in groups.values():
+            sig = devig_line_signature(group_outcomes)
+            if {outcome_key(o) for o in group_outcomes} != canonical_keys.get(sig):
                 continue  # partial line -- doesn't get a vote
             if len(group_outcomes) < 2:
                 continue
